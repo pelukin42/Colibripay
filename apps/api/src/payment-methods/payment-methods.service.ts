@@ -13,18 +13,28 @@ import {
   toPublicPaymentMethod,
   type PublicPaymentMethod,
 } from '../payment-intents/payment-intents.serializer.js';
-import type { CreatePaymentMethodDto } from './payment-methods.dto.js';
+import type {
+  CardRawDto,
+  CardTokenDto,
+  CreatePaymentMethodDto,
+  SinpeDto,
+} from './payment-methods.dto.js';
 
 /**
- * Tokenización.
+ * Métodos de pago.
  *
- * Este es el ÚNICO punto del sistema que ve un número de tarjeta, y lo ve de
- * paso: lo recibe, lo manda al vault del adquirente y lo descarta. Nada de lo
- * que entra acá se persiste ni se registra en logs.
+ * Dos caminos con consecuencias PCI opuestas:
  *
- * En producción esta ruta no debería recibir el PAN directamente del comercio:
- * lo envía el iframe del checkout desde el navegador del comprador, con llave
- * pública. Esa separación es la que mantiene el alcance PCI en SAQ A.
+ *  - `createCardFromToken` — el navegador tokenizó contra el vault del
+ *    adquirente y acá solo llega la referencia. El PAN nunca tocó nuestra
+ *    infraestructura. Es lo que usa el checkout y es el camino por defecto.
+ *
+ *  - `createCard` — el PAN llega a nuestros servidores. Nos pone en alcance
+ *    PCI DSS completo como proveedor de servicio. Existe para adquirentes sin
+ *    tokenización desde el navegador y para comercios ya certificados.
+ *
+ * Ninguno de los dos persiste ni registra el número: lo que se guarda es el
+ * token opaco más metadatos con los que la tarjeta no se puede reconstruir.
  */
 @Injectable()
 export class PaymentMethodsService {
@@ -34,13 +44,74 @@ export class PaymentMethodsService {
     auth: AuthContext,
     dto: CreatePaymentMethodDto,
   ): Promise<PublicPaymentMethod> {
-    if (dto.type === 'CARD') return this.createCard(auth, dto);
-    return this.createSinpe(auth, dto);
+    if (dto.type === 'SINPE_MOVIL') return this.createSinpe(auth, dto);
+    return 'token' in dto ? this.createCardFromToken(auth, dto) : this.createCard(auth, dto);
   }
 
+  /**
+   * Camino normal: el navegador ya tokenizó contra el vault del adquirente y
+   * acá solo llega la referencia opaca. El PAN nunca tocó nuestros servidores.
+   */
+  private async createCardFromToken(
+    auth: AuthContext,
+    dto: CardTokenDto,
+  ): Promise<PublicPaymentMethod> {
+    const acquirer = selectAcquirer({ methodType: 'CARD', currency: 'CRC' });
+
+    // Los metadatos se resuelven contra el adquirente, NO se toman de lo que
+    // mande el cliente. Si confiáramos en el navegador, cualquiera podría
+    // guardar una tarjeta declarando la marca y los últimos 4 que quisiera —
+    // y esos datos terminan en recibos, en el panel y en la evidencia de una
+    // disputa.
+    const described = await acquirer.describeToken(dto.token, {
+      merchantId: auth.merchantPublicId,
+      mode: auth.mode,
+      idempotencyKey: '',
+      credentials: {},
+    });
+
+    if (described.status !== 'approved') {
+      throw ColibriError.invalidRequest(
+        'El token de tarjeta no es válido o ya venció',
+        'token',
+      );
+    }
+
+    const method = await this.prisma.paymentMethod.create({
+      data: {
+        publicId: generateId(ID_PREFIXES.paymentMethod),
+        merchantId: auth.merchantId,
+        mode: auth.mode,
+        customerId: dto.customerId
+          ? await this.resolveCustomerId(auth, dto.customerId)
+          : null,
+        type: 'CARD',
+        brand: described.brand,
+        last4: described.last4,
+        bin: described.bin,
+        expMonth: described.expMonth,
+        expYear: described.expYear,
+        fingerprint: described.fingerprint ?? null,
+        cvcCheck: described.cvcCheck ?? null,
+        acquirerToken: described.token,
+        acquirerAdapter: acquirer.name,
+        billingName: dto.billing?.name ?? null,
+        billingEmail: dto.billing?.email ?? null,
+        billingCountry: dto.billing?.country ?? 'CR',
+      },
+    });
+
+    return toPublicPaymentMethod(method);
+  }
+
+  /**
+   * Camino servidor-a-servidor. RECIBE EL PAN, con el alcance PCI que eso
+   * implica. Solo para comercios ya certificados o adquirentes sin
+   * tokenización desde el navegador.
+   */
   private async createCard(
     auth: AuthContext,
-    dto: Extract<CreatePaymentMethodDto, { type: 'CARD' }>,
+    dto: CardRawDto,
   ): Promise<PublicPaymentMethod> {
     const acquirer = selectAcquirer({ methodType: 'CARD', currency: 'CRC' });
 
@@ -99,7 +170,7 @@ export class PaymentMethodsService {
 
   private async createSinpe(
     auth: AuthContext,
-    dto: Extract<CreatePaymentMethodDto, { type: 'SINPE_MOVIL' }>,
+    dto: SinpeDto,
   ): Promise<PublicPaymentMethod> {
     const method = await this.prisma.paymentMethod.create({
       data: {

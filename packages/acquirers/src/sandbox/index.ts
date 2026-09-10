@@ -1,9 +1,11 @@
 import {
   randomString,
   type AcquirerAdapter,
+  type AcquirerContext,
   type AcquirerResult,
   type AuthorizationData,
   type AuthorizeRequest,
+  type BrowserTokenizationTarget,
   type CaptureData,
   type CaptureRequest,
   type Currency,
@@ -65,15 +67,37 @@ function decodeRef(reference: string): SandboxRef | null {
   }
 }
 
-function encodeToken(behavior: SandboxBehavior): string {
-  const b64 = btoa(JSON.stringify(behavior))
+/**
+ * Contenido de un token del sandbox: el escenario a simular más los metadatos
+ * NO sensibles de la tarjeta.
+ *
+ * Guardar los metadatos dentro del token es lo que permite que `describeToken`
+ * funcione sin estado ni base de datos. No hay PAN acá: `last4` y `bin` son
+ * justamente lo que un adquirente real devuelve y lo que ya guardamos en
+ * `payment_methods`; con ellos no se reconstruye el número.
+ */
+interface SandboxTokenPayload {
+  b: SandboxBehavior;
+  m: {
+    brand: string;
+    last4: string;
+    bin: string;
+    expMonth: number;
+    expYear: number;
+    fingerprint: string;
+    cvcCheck: 'pass' | 'fail' | 'unavailable';
+  };
+}
+
+function encodeToken(payload: SandboxTokenPayload): string {
+  const b64 = btoa(JSON.stringify(payload))
     .replace(/\+/g, '-')
     .replace(/\//g, '_')
     .replace(/=+$/, '');
   return `tok_sbx_${b64}_${randomString(12)}`;
 }
 
-function decodeToken(token: string): SandboxBehavior | null {
+function decodeToken(token: string): SandboxTokenPayload | null {
   const parts = token.split('_');
   // tok_sbx_<payload>_<random>
   if (parts.length !== 4 || parts[0] !== 'tok' || parts[1] !== 'sbx' || !parts[2]) {
@@ -81,7 +105,8 @@ function decodeToken(token: string): SandboxBehavior | null {
   }
   try {
     const b64 = parts[2].replace(/-/g, '+').replace(/_/g, '/');
-    return JSON.parse(atob(b64)) as SandboxBehavior;
+    const parsed = JSON.parse(atob(b64)) as SandboxTokenPayload;
+    return parsed.b && parsed.m ? parsed : null;
   } catch {
     return null;
   }
@@ -94,6 +119,8 @@ export interface SandboxOptions {
   latencyMs?: number;
   /** Milisegundos que espera la tarjeta `4000000000000010` antes de fallar. */
   timeoutMs?: number;
+  /** URL del vault simulado al que postea el navegador. */
+  vaultUrl?: string;
 }
 
 export class SandboxAcquirer implements AcquirerAdapter {
@@ -105,10 +132,13 @@ export class SandboxAcquirer implements AcquirerAdapter {
 
   private readonly latencyMs: number;
   private readonly timeoutMs: number;
+  private readonly vaultUrl: string;
 
   constructor(options: SandboxOptions = {}) {
     this.latencyMs = options.latencyMs ?? 120;
     this.timeoutMs = options.timeoutMs ?? 30_000;
+    this.vaultUrl =
+      options.vaultUrl ?? process.env.SANDBOX_VAULT_URL ?? 'http://localhost:4002/tokenize';
   }
 
   async tokenize(req: TokenizeRequest): Promise<AcquirerResult<TokenData>> {
@@ -141,9 +171,7 @@ export class SandboxAcquirer implements AcquirerAdapter {
       return { status: 'declined', declineCode: 'incorrect_cvc', rawCode: 'SBX_CVC' };
     }
 
-    return {
-      status: 'approved',
-      token: encodeToken(behavior),
+    const metadata: SandboxTokenPayload['m'] = {
       brand: detectBrand(number),
       last4: number.slice(-4),
       bin: number.slice(0, 6),
@@ -151,10 +179,44 @@ export class SandboxAcquirer implements AcquirerAdapter {
       expYear: req.card.expYear,
       // Huella estable por tarjeta, sin permitir reconstruir el número.
       fingerprint: `sbxfp_${number.slice(0, 6)}${number.slice(-4)}`,
-      cvcCheck: behavior.kind === 'decline' && behavior.declineCode === 'incorrect_cvc'
-        ? 'fail'
-        : 'pass',
+      cvcCheck:
+        behavior.kind === 'decline' && behavior.declineCode === 'incorrect_cvc'
+          ? 'fail'
+          : 'pass',
     };
+
+    // `number` y `cvc` no vuelven a usarse a partir de acá.
+    return { status: 'approved', token: encodeToken({ b: behavior, m: metadata }), ...metadata };
+  }
+
+  /**
+   * Vault del sandbox al que apunta el navegador.
+   *
+   * En producción esta URL sería el dominio del adquirente. Acá es un servidor
+   * local aparte (scripts/sandbox-vault.ts) precisamente para que el flujo del
+   * checkout sea el real: la tarjeta va a un tercero, no a nuestra API.
+   */
+  browserTokenizationTarget(context: AcquirerContext): BrowserTokenizationTarget {
+    return {
+      url: this.vaultUrl,
+      method: 'POST',
+      fields: { merchant: context.merchantId, mode: context.mode },
+      fieldNames: {
+        number: 'number',
+        expMonth: 'expMonth',
+        expYear: 'expYear',
+        cvc: 'cvc',
+        holderName: 'holderName',
+      },
+    };
+  }
+
+  async describeToken(token: string): Promise<AcquirerResult<TokenData>> {
+    const payload = decodeToken(token);
+    if (!payload) {
+      return { status: 'error', retryable: false, message: 'Token desconocido' };
+    }
+    return { status: 'approved', token, ...payload.m };
   }
 
   async authorize(
@@ -184,10 +246,11 @@ export class SandboxAcquirer implements AcquirerAdapter {
       };
     }
 
-    const behavior = decodeToken(req.token);
-    if (!behavior) {
+    const payload = decodeToken(req.token);
+    if (!payload) {
       return { status: 'error', retryable: false, message: 'Token de sandbox inválido' };
     }
+    const behavior = payload.b;
 
     switch (behavior.kind) {
       case 'approve':

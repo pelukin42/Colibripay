@@ -14,11 +14,17 @@ import { PaymentMethodsController } from './payment-methods/payment-methods.cont
 import { PaymentMethodsService } from './payment-methods/payment-methods.service.js';
 import { WebhookDeliveryService } from './webhooks/webhook-delivery.service.js';
 import { WebhookWorker } from './webhooks/webhook.worker.js';
+import { CheckoutController } from './checkout/checkout.controller.js';
 import { HealthController } from './health.controller.js';
 
 @Module({
   imports: [PrismaModule],
-  controllers: [PaymentIntentsController, PaymentMethodsController, HealthController],
+  controllers: [
+    PaymentIntentsController,
+    PaymentMethodsController,
+    CheckoutController,
+    HealthController,
+  ],
   providers: [
     CryptoService,
     LedgerService,

@@ -1,11 +1,19 @@
 import { z } from 'zod';
 
 /**
- * Entrada de tokenización.
+ * Entrada de `POST /v1/payment_methods`. Dos caminos, con consecuencias muy
+ * distintas para el alcance PCI:
  *
- * El esquema valida forma, no validez de la tarjeta: Luhn, vencimiento y CVC
- * los verifica el adquirente. Duplicar esas reglas acá crearía dos fuentes de
- * verdad que se desincronizan.
+ *  - **`token`** — el navegador ya tokenizó la tarjeta contra el vault del
+ *    adquirente y acá solo llega la referencia opaca. Es el camino normal, el
+ *    que usa el checkout, y el que mantiene el PAN fuera de nuestra
+ *    infraestructura.
+ *
+ *  - **`card`** — el número crudo llega a nuestros servidores. Nos mete en
+ *    alcance PCI DSS completo como proveedor de servicio. Existe solo para
+ *    comercios que ya están certificados y quieren integración
+ *    servidor-a-servidor, y para adquirentes sin tokenización desde el
+ *    navegador. No es el default y no debería serlo nunca.
  */
 
 const billing = z
@@ -16,11 +24,19 @@ const billing = z
   })
   .optional();
 
-const cardSchema = z.object({
+const cardTokenSchema = z.object({
+  type: z.literal('CARD'),
+  token: z.string().min(10).max(2000),
+  customerId: z.string().startsWith('cus_').optional(),
+  billing,
+});
+
+const cardRawSchema = z.object({
   type: z.literal('CARD'),
   card: z.object({
-    // Solo dígitos y espacios: rechazar basura antes de mandarla al adquirente
-    // evita gastar una llamada de red en algo que no puede funcionar.
+    // Solo dígitos, espacios y guiones: rechazar basura antes de gastar una
+    // llamada de red. La validación real (Luhn, vencimiento) la hace el
+    // adquirente; duplicarla acá crearía dos fuentes de verdad.
     number: z.string().regex(/^[\d\s-]{12,25}$/, 'Número de tarjeta inválido'),
     expMonth: z.number().int().min(1).max(12),
     expYear: z.number().int().min(2024).max(2099),
@@ -41,9 +57,18 @@ const sinpeSchema = z.object({
   billing,
 });
 
-export const createPaymentMethodSchema = z.discriminatedUnion('type', [
-  cardSchema,
+/**
+ * Se usa `union` y no `discriminatedUnion` porque dos variantes comparten el
+ * mismo `type: 'CARD'` y se distinguen por el campo presente. El orden importa:
+ * la variante con token va primero para que sea la que se intenta antes.
+ */
+export const createPaymentMethodSchema = z.union([
+  cardTokenSchema,
+  cardRawSchema,
   sinpeSchema,
 ]);
 
 export type CreatePaymentMethodDto = z.infer<typeof createPaymentMethodSchema>;
+export type CardTokenDto = z.infer<typeof cardTokenSchema>;
+export type CardRawDto = z.infer<typeof cardRawSchema>;
+export type SinpeDto = z.infer<typeof sinpeSchema>;

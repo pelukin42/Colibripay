@@ -13,7 +13,7 @@ Este repositorio construye **la plataforma**. No construye —porque no se puede
 | Requisito | Cómo se resuelve |
 |---|---|
 | Procesar tarjetas de verdad | Contrato de afiliación con un adquirente (BAC Credomatic, Promerica, BN, Davivienda) y certificación con ellos |
-| Tocar el número de tarjeta | Certificación PCI DSS. **La evitamos**: el checkout va en su propio origen y el PAN viaja del iframe al vault del adquirente sin pasar por nuestros servidores → alcance SAQ A |
+| Tocar el número de tarjeta | Certificación PCI DSS. **La acotamos**: el navegador postea la tarjeta directo al vault del adquirente y a nuestra API solo le llega un token opaco. Verificado: el PAN no aparece ni en los logs ni en la base |
 | SINPE Móvil | Se accede a través de un banco. El BCCR no conecta entidades no reguladas |
 | Retener fondos de terceros | Régimen SUGEF / Ley 8204. Mientras el adquirente liquide directo al comercio, no aplica |
 
@@ -31,13 +31,13 @@ packages/
   acquirers/   Adaptadores. Hoy: sandbox. Mañana: BAC, Promerica, …
 apps/
   api/         NestJS. Core de pagos: auth, idempotencia, ledger, eventos
-  checkout/    (pendiente) Checkout hospedado — origen separado a propósito
+  checkout/    Next.js. Checkout hospedado — origen separado a propósito
   dashboard/   (pendiente) Panel del comercio
 ```
 
 ### Por qué está partido así
 
-- **`checkout` aparte no es capricho**: vive en otro origen y con superficie mínima. Es lo que mantiene el alcance PCI en SAQ A en vez de SAQ D.
+- **`checkout` aparte no es capricho**: vive en otro origen y con superficie mínima. Junto con la tokenización desde el navegador, es lo que mantiene el PAN fuera de nuestra infraestructura.
 - **`acquirers` aparte**: se prueba sin levantar la API y se puede certificar un adaptador nuevo en aislamiento.
 - **`db` aparte**: el ledger necesita migraciones versionadas y transacciones serializables. Sin capas de por medio.
 
@@ -46,7 +46,7 @@ apps/
 ## Decisiones que no se negocian
 
 1. **Los montos son `BigInt` en unidades mínimas.** Nunca `number`, nunca `Decimal` en la ruta caliente. `0.1 + 0.2 !== 0.3` y los enteros de JS mienten después de 2^53.
-2. **Ningún modelo guarda PAN, CVV ni datos de banda.** Solo tokens opacos del adquirente. Si aparece un campo así en el esquema, el alcance PCI del proyecto se multiplica.
+2. **El PAN nunca toca nuestros servidores.** El navegador lo postea directo al vault del adquirente; a la API solo le llega un token. Existe un camino servidor-a-servidor (`card` en vez de `token`) pero expande el alcance PCI y no es el default.
 3. **Un rechazo del emisor es un resultado, no una excepción.** Los `throw` se reservan para fallos de transporte.
 4. **Toda escritura pasa por idempotencia.** Sin eso, un reintento de red del comercio cobra dos veces.
 5. **El ledger es de doble partida y cuadra o no se escribe.** `SUM(entries.amount) = 0`, con signo: positivo = débito, negativo = crédito.
@@ -94,6 +94,31 @@ pnpm --filter @colibripay/api dev
 | `pnpm test` | Corre las pruebas de todos los paquetes |
 | `pnpm typecheck` | Verifica tipos en todo el monorepo |
 | `SK=… PK=… bash scripts/smoke.sh` | Prueba de humo HTTP de punta a punta |
+
+---
+
+## Checkout hospedado
+
+Vive en `apps/checkout`, en su propio origen y su propio puerto. El flujo tiene dos pasos y el orden es lo que importa:
+
+1. El navegador postea la tarjeta **al vault del adquirente** — no a nuestra API.
+2. El navegador manda el **token** a `POST /v1/checkout/confirm`.
+
+Nuestra infraestructura nunca ve el número. Está verificado de punta a punta: tras un cobro real, el PAN completo tiene cero apariciones en los logs de la API y cero en la base de datos; lo único guardado es marca, últimos 4, BIN y vencimiento.
+
+La credencial del checkout es el `client_secret`, no una llave de API: alcanza a un solo PaymentIntent y muere con él.
+
+```bash
+pnpm vault
+```
+
+```bash
+pnpm --filter @colibripay/checkout dev
+```
+
+El enlace de pago es `http://localhost:4001/pay?cs=<client_secret>`.
+
+> **Pendiente:** completar el desafío 3-D Secure. Hoy un intent que lo requiere queda en `REQUIRES_ACTION` y el checkout lo muestra como verificación pendiente, pero no hay pantalla que lo resuelva.
 
 ---
 
@@ -179,7 +204,7 @@ Las últimas cuatro existen porque son los casos que rompen integraciones mal he
 
 - Recursos `customers` y `refunds`
 - Job de liberación de fondos T+N y payouts
-- `apps/checkout` — checkout hospedado con campos en iframe
+- Completar el desafío 3-D Secure en el checkout
 - `apps/dashboard` — panel del comercio
 - Conciliación contra archivo de liquidación
 - Motor de reglas de riesgo

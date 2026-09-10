@@ -113,9 +113,18 @@ export interface AcquirerContext {
 }
 
 /**
- * Datos crudos de tarjeta. SOLO existe en el borde de tokenización, viajando
- * desde el iframe del checkout hacia el vault. Ninguna otra parte del sistema
- * debe aceptar este tipo, y nunca se persiste.
+ * Datos crudos de tarjeta.
+ *
+ * ATENCIÓN AL ALCANCE PCI: si este tipo llega a nuestros servidores, la
+ * plataforma entra en alcance PCI DSS completo como proveedor de servicio.
+ * El camino que EVITA eso es `BrowserTokenizationTarget`: el navegador manda
+ * la tarjeta directo al vault del adquirente y a nosotros solo nos llega un
+ * token.
+ *
+ * `tokenize()` existe igual porque algunos adquirentes no ofrecen tokenización
+ * desde el navegador, y porque un comercio que ya está certificado PCI puede
+ * querer el camino servidor-a-servidor. Es una decisión consciente por
+ * adaptador, no el default.
  */
 export interface RawCardInput {
   number: string;
@@ -123,6 +132,29 @@ export interface RawCardInput {
   expYear: number;
   cvc: string;
   holderName?: string;
+}
+
+/**
+ * Adónde debe enviar el navegador los datos de la tarjeta.
+ *
+ * Esta es la pieza que mantiene el PAN fuera de nuestra infraestructura. El
+ * checkout construye el formulario, pero lo envía a `url` —el vault del
+ * adquirente, otro dominio, otra empresa— y recibe un token. Nuestros
+ * servidores nunca ven el número.
+ */
+export interface BrowserTokenizationTarget {
+  url: string;
+  method: 'POST';
+  /** Campos que el navegador debe incluir además de los datos de la tarjeta. */
+  fields: Record<string, string>;
+  /** Nombres esperados para los campos de tarjeta en ese endpoint. */
+  fieldNames: {
+    number: string;
+    expMonth: string;
+    expYear: string;
+    cvc: string;
+    holderName?: string;
+  };
 }
 
 export interface TokenizeRequest {
@@ -212,6 +244,27 @@ export interface AcquirerAdapter {
   readonly supportsManualCapture: boolean;
   readonly supportsPartialRefund: boolean;
 
+  /**
+   * Dónde debe postear el navegador la tarjeta para tokenizarla sin que pase
+   * por nosotros. `null` si el adquirente no lo soporta — en ese caso el único
+   * camino es `tokenize()`, con el costo de alcance PCI que eso implica.
+   */
+  browserTokenizationTarget(context: AcquirerContext): BrowserTokenizationTarget | null;
+
+  /**
+   * Metadatos no sensibles de un token: marca, últimos 4, vencimiento.
+   *
+   * Existe para NO confiar en lo que reporta el navegador. Cuando el checkout
+   * nos manda un token, esos datos se resuelven contra el adquirente; si los
+   * tomáramos del cliente, cualquiera podría guardar una tarjeta con la marca
+   * y los últimos 4 que se le antojen.
+   */
+  describeToken(token: string, context: AcquirerContext): Promise<AcquirerResult<TokenData>>;
+
+  /**
+   * Tokenización servidor-a-servidor. EXPANDE EL ALCANCE PCI: recibe el PAN.
+   * Preferir siempre `browserTokenizationTarget` cuando el adquirente lo ofrezca.
+   */
   tokenize(req: TokenizeRequest): Promise<AcquirerResult<TokenData>>;
 
   authorize(
