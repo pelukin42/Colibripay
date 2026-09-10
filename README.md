@@ -30,7 +30,7 @@ packages/
   db/          Prisma + Postgres. El esquema es la fuente de verdad del dominio
   acquirers/   Adaptadores. Hoy: sandbox. Mañana: BAC, Promerica, …
 apps/
-  api/         (pendiente) Core de pagos, webhooks, workers
+  api/         NestJS. Core de pagos: auth, idempotencia, ledger, eventos
   checkout/    (pendiente) Checkout hospedado — origen separado a propósito
   dashboard/   (pendiente) Panel del comercio
 ```
@@ -116,21 +116,36 @@ Las últimas cuatro existen porque son los casos que rompen integraciones mal he
 
 ## Estado
 
-**Listo y verificado** (33 pruebas en verde, typecheck limpio):
+**Listo y verificado** (51 pruebas en verde, typecheck limpio en los 4 paquetes):
 
-- Esquema de datos completo — comercios, llaves, clientes, bóveda de métodos, intents, cargos, reembolsos, disputas, ledger de doble partida, payouts, eventos, webhooks e idempotencia
-- Contratos compartidos — aritmética monetaria, IDs con prefijo, catálogo de errores y rechazos, catálogo de eventos, máquina de estados del PaymentIntent
-- Interfaz `AcquirerAdapter` y adaptador sandbox completo (tokenización, autorización, 3DS, captura parcial, anulación, reembolso)
+- **Esquema de datos completo** — comercios, llaves, clientes, bóveda de métodos, intents, cargos, reembolsos, disputas, ledger de doble partida, payouts, eventos, webhooks e idempotencia
+- **Contratos compartidos** — aritmética monetaria, IDs con prefijo, errores y rechazos, eventos, máquina de estados del PaymentIntent
+- **Reglas de asiento contable** — funciones puras, con una prueba que corre 1000 operaciones aleatorias verificando en cada paso que el libro suma cero
+- **Interfaz `AcquirerAdapter` y adaptador sandbox** — tokenización, autorización, 3DS, captura parcial, anulación, reembolso. Sin estado
+- **API** — autenticación por llave de API, idempotencia, ledger persistente, eventos, y el recurso `payment_intents` completo
+
+### Endpoints
+
+| Método | Ruta | Llave |
+|---|---|---|
+| `POST` | `/v1/payment_intents` | secreta |
+| `GET` | `/v1/payment_intents/:id` | secreta |
+| `POST` | `/v1/payment_intents/:id/confirm` | pública o secreta |
+| `POST` | `/v1/payment_intents/:id/capture` | secreta |
+| `POST` | `/v1/payment_intents/:id/cancel` | secreta |
+| `GET` | `/health` | ninguna |
+
+**Sin verificar todavía:** la API compila y las reglas puras están probadas, pero nada se ejecutó contra Postgres — no hay base de datos disponible en esta máquina. Antes de confiar en el flujo completo hay que levantar Postgres, correr `pnpm db:migrate && pnpm db:seed` y probar un cobro de punta a punta.
 
 **Pendiente:**
 
-- `apps/api` — endpoints, middleware de idempotencia, autenticación por API key, servicio de ledger, cola de webhooks
+- Worker de webhooks (BullMQ) con firma HMAC — el backoff ya está definido
+- Tokenización de tarjetas y recursos `customers`, `payment_methods`, `refunds`
+- Job de liberación de fondos T+N y payouts
 - `apps/checkout` — checkout hospedado con campos en iframe
 - `apps/dashboard` — panel del comercio
 - Conciliación contra archivo de liquidación
 - Motor de reglas de riesgo
-
----
 
 ## Nota sobre la ubicación del repo
 
