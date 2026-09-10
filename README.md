@@ -32,7 +32,7 @@ packages/
 apps/
   api/         NestJS. Core de pagos: auth, idempotencia, ledger, eventos
   checkout/    Next.js. Checkout hospedado — origen separado a propósito
-  dashboard/   (pendiente) Panel del comercio
+  dashboard/   Next.js. Panel del comercio
 ```
 
 ### Por qué está partido así
@@ -94,6 +94,24 @@ pnpm --filter @colibripay/api dev
 | `pnpm test` | Corre las pruebas de todos los paquetes |
 | `pnpm typecheck` | Verifica tipos en todo el monorepo |
 | `SK=… PK=… bash scripts/smoke.sh` | Prueba de humo HTTP de punta a punta |
+
+---
+
+## Dashboard del comercio
+
+Vive en `apps/dashboard`. Muestra saldos, cobros, el detalle de cada intento con su RRN para conciliar contra el banco, y la gestión de llaves de API y webhooks.
+
+**Lee la base directamente** desde componentes de servidor, en vez de hablar con la API de pagos. La razón: esa API existe para que los comercios integren con llaves de API, y el dashboard se autentica con usuario y contraseña. Mezclarlas obligaría a que cada endpoint acepte dos formas de autenticación distintas, y esa ambigüedad en un servicio que mueve plata es como se cuelan los agujeros. Cuando el panel necesite ejecutar lógica de pagos —un reembolso, por ejemplo— sí llamará a la API.
+
+**Contraseñas con scrypt**, no Argon2id. Argon2 sería la primera opción, pero exige dependencias nativas que en Windows fallan al compilar con frecuencia. scrypt viene en Node, es memory-hard igual y OWASP lo acepta explícitamente. Los parámetros se guardan dentro del propio hash, así que subirlos más adelante no invalida las contraseñas viejas.
+
+**Sesión en cookie firmada con HMAC**, no un JWT de librería: lo único que se necesita es "este payload lo emitimos nosotros y no venció". Un JWT traería negociación de algoritmo —de donde sale la familia `alg: none`— sin aportar nada que usemos. La cookie lleva solo IDs; el rol y el estado del comercio se leen de la base en cada petición, para que revocarle el acceso a alguien tenga efecto inmediato.
+
+El modo por defecto es **TEST**. Ver datos reales exige pedirlo explícitamente.
+
+```bash
+pnpm --filter @colibripay/dashboard dev
+```
 
 ---
 
@@ -185,6 +203,8 @@ Las últimas cuatro existen porque son los casos que rompen integraciones mal he
 - **Interfaz `AcquirerAdapter` y adaptador sandbox** — tokenización, autorización, 3DS, captura parcial, anulación, reembolso. Sin estado
 - **API** — autenticación por llave de API, idempotencia, ledger persistente, eventos, `payment_intents` y `payment_methods`
 - **Webhooks** — cola en Postgres con `SKIP LOCKED`, firma HMAC-SHA256, 8 reintentos con backoff, apagado automático de endpoints muertos y filtro anti-SSRF
+- **Checkout hospedado** — tokenización desde el navegador, verificado: el PAN no llega a la API ni a la base
+- **Dashboard** — login con scrypt, sesión firmada, saldos, cobros, detalle con RRN, llaves de API y webhooks
 
 ### Endpoints
 
@@ -205,7 +225,6 @@ Las últimas cuatro existen porque son los casos que rompen integraciones mal he
 - Recursos `customers` y `refunds`
 - Job de liberación de fondos T+N y payouts
 - Completar el desafío 3-D Secure en el checkout
-- `apps/dashboard` — panel del comercio
 - Conciliación contra archivo de liquidación
 - Motor de reglas de riesgo
 

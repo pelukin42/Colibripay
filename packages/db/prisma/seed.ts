@@ -1,9 +1,13 @@
-import { randomBytes, createHash } from 'node:crypto';
+import { randomBytes } from 'node:crypto';
 import { PrismaClient } from '@prisma/client';
 import { hashApiKey } from '../src/api-keys.js';
 import { encryptSecret } from '../src/encryption.js';
+import { hashPassword } from '../src/passwords.js';
 
 const prisma = new PrismaClient();
+
+/** Solo para desarrollo. En producción el alta la hace el propio comercio. */
+const DEMO_PASSWORD = 'colibri-demo-2026';
 
 /** Base58 sin caracteres ambiguos, igual que en @colibripay/shared. */
 const ALPHABET = '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz';
@@ -40,14 +44,18 @@ async function main(): Promise<void> {
     },
   });
 
+  const passwordHash = await hashPassword(DEMO_PASSWORD);
+
   const user = await prisma.user.upsert({
     where: { email: 'demo@colibripay.test' },
-    update: {},
+    // La contraseña se reescribe en cada seed. Con `update: {}` un usuario ya
+    // existente conservaba el hash viejo y las credenciales que imprime este
+    // script dejaban de servir — sin ninguna señal de por qué.
+    update: { passwordHash },
     create: {
       email: 'demo@colibripay.test',
       name: 'Dueño Demo',
-      // Placeholder: el login del dashboard usará Argon2id, no esto.
-      passwordHash: createHash('sha256').update('demo-no-usar').digest('hex'),
+      passwordHash,
     },
   });
 

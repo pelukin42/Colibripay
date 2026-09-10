@@ -43,3 +43,4 @@ export function serializeBigInt<T>(value: T): T {
 }
 export * from './api-keys.js';
 export * from './encryption.js';
+export * from './passwords.js';
