@@ -10,16 +10,19 @@ import { LedgerService } from './ledger/ledger.service.js';
 import { EventsService } from './events/events.service.js';
 import { PaymentIntentsController } from './payment-intents/payment-intents.controller.js';
 import { PaymentIntentsService } from './payment-intents/payment-intents.service.js';
+import { PaymentMethodsController } from './payment-methods/payment-methods.controller.js';
+import { PaymentMethodsService } from './payment-methods/payment-methods.service.js';
 import { HealthController } from './health.controller.js';
 
 @Module({
   imports: [PrismaModule],
-  controllers: [PaymentIntentsController, HealthController],
+  controllers: [PaymentIntentsController, PaymentMethodsController, HealthController],
   providers: [
     CryptoService,
     LedgerService,
     EventsService,
     PaymentIntentsService,
+    PaymentMethodsService,
 
     // El guard es GLOBAL a propósito. Si la autenticación se aplicara ruta por
     // ruta, el día que alguien agregue un endpoint y olvide el decorador

@@ -61,31 +61,38 @@ pnpm install
 cp .env.example .env
 ```
 
-Necesitás Postgres y Redis. Con Docker:
+Levantá PostgreSQL. **No hace falta Docker ni permisos de administrador**: `pnpm db:local` descarga los binarios oficiales de PostgreSQL 18 y los corre como un proceso más del usuario.
 
 ```bash
-docker run -d --name colibri-pg -e POSTGRES_USER=colibri -e POSTGRES_PASSWORD=colibri -e POSTGRES_DB=colibripay -p 5432:5432 postgres:16
+pnpm db:local
 ```
 
+El clúster se guarda en `%LOCALAPPDATA%\colibripay\pgdata`, deliberadamente fuera del repositorio — está en una carpeta de OneDrive, y sincronizar una base de datos hace que `initdb` tarde minutos y quede expuesta a conflictos de sincronización.
+
+En otra terminal, aplicá el esquema y creá el comercio de prueba:
+
 ```bash
-docker run -d --name colibri-redis -p 6379:6379 redis:7
+pnpm db:push && pnpm db:seed
 ```
 
-Luego:
+El seed imprime las llaves de API. Luego levantá la API:
 
 ```bash
-pnpm db:generate && pnpm db:migrate
+pnpm --filter @colibripay/api dev
 ```
 
 ### Comandos
 
 | Comando | Qué hace |
 |---|---|
-| `pnpm db:generate` | Regenera el cliente de Prisma |
-| `pnpm db:migrate` | Crea y aplica una migración |
+| `pnpm db:local` | Levanta PostgreSQL local (sin Docker) |
+| `pnpm db:push` | Sincroniza el esquema con la base |
+| `pnpm db:seed` | Crea el comercio demo e imprime sus llaves |
 | `pnpm db:studio` | Explorador visual de la base |
+| `pnpm db:verify-ledger` | Comprueba que el libro contable cuadre |
 | `pnpm test` | Corre las pruebas de todos los paquetes |
 | `pnpm typecheck` | Verifica tipos en todo el monorepo |
+| `SK=… PK=… bash scripts/smoke.sh` | Prueba de humo HTTP de punta a punta |
 
 ---
 
@@ -133,14 +140,15 @@ Las últimas cuatro existen porque son los casos que rompen integraciones mal he
 | `POST` | `/v1/payment_intents/:id/confirm` | pública o secreta |
 | `POST` | `/v1/payment_intents/:id/capture` | secreta |
 | `POST` | `/v1/payment_intents/:id/cancel` | secreta |
+| `POST` | `/v1/payment_methods` | pública o secreta |
 | `GET` | `/health` | ninguna |
 
-**Sin verificar todavía:** la API compila y las reglas puras están probadas, pero nada se ejecutó contra Postgres — no hay base de datos disponible en esta máquina. Antes de confiar en el flujo completo hay que levantar Postgres, correr `pnpm db:migrate && pnpm db:seed` y probar un cobro de punta a punta.
+**Verificado contra PostgreSQL 18 real**, no solo compilado: 51 pruebas unitarias, 21 pruebas de humo HTTP de punta a punta (autenticación, idempotencia con reproducción y conflicto, tokenización, cobro, rechazo, captura parcial y cancelación) y el libro contable cuadrando en cero tras cobros reales.
 
 **Pendiente:**
 
 - Worker de webhooks (BullMQ) con firma HMAC — el backoff ya está definido
-- Tokenización de tarjetas y recursos `customers`, `payment_methods`, `refunds`
+- Recursos `customers` y `refunds`
 - Job de liberación de fondos T+N y payouts
 - `apps/checkout` — checkout hospedado con campos en iframe
 - `apps/dashboard` — panel del comercio

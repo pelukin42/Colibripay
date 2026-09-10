@@ -19,7 +19,8 @@
     "verify-ledger": "dotenv -e ../../.env -- tsx scripts/verify-ledger.ts",
     "build": "prisma generate",
     "typecheck": "tsc --noEmit",
-    "clean": "rimraf node_modules .turbo"
+    "clean": "rimraf node_modules .turbo",
+    "postgres": "tsx scripts/dev-postgres.ts"
   },
   "dependencies": {
     "@prisma/client": "^6.19.3"
@@ -27,6 +28,7 @@
   "devDependencies": {
     "dotenv": "^16.4.7",
     "dotenv-cli": "^8.0.0",
+    "embedded-postgres": "18.4.0-beta.17",
     "prisma": "^6.19.3",
     "rimraf": "^6.0.1",
     "tsx": "^4.19.2",

@@ -17,7 +17,9 @@
     "db:push": "pnpm --filter @colibripay/db push",
     "db:seed": "pnpm --filter @colibripay/db seed",
     "db:studio": "pnpm --filter @colibripay/db studio",
-    "clean": "turbo run clean && rimraf node_modules"
+    "clean": "turbo run clean && rimraf node_modules",
+    "db:local": "pnpm --filter @colibripay/db postgres",
+    "db:verify-ledger": "pnpm --filter @colibripay/db verify-ledger"
   },
   "devDependencies": {
     "@types/node": "^22.10.5",

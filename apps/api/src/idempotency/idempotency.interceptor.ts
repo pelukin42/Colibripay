@@ -46,7 +46,7 @@ export class IdempotencyInterceptor implements NestInterceptor {
 
   constructor(
     @Inject(PRISMA) private readonly prisma: PrismaClient,
-    private readonly crypto: CryptoService,
+    @Inject(CryptoService) private readonly crypto: CryptoService,
   ) {}
 
   intercept(context: ExecutionContext, next: CallHandler): Observable<unknown> {

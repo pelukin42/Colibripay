@@ -520,6 +520,15 @@ model Dispute {
 model LedgerAccount {
   id         String            @id @default(cuid())
   merchantId String?
+  /// Discriminador NO nulo para la unicidad: el id del comercio, o "platform"
+  /// en las cuentas propias.
+  ///
+  /// Existe porque Postgres considera distintos entre sí a dos NULL, así que un
+  /// índice único que incluya `merchantId` NO impide crear dos cuentas de
+  /// plataforma del mismo tipo. El resultado sería un saldo partido en dos
+  /// filas: el libro seguiría cuadrando en cero y nadie lo notaría hasta
+  /// conciliar. Con esta columna la restricción se aplica de verdad.
+  scopeKey   String
   type       LedgerAccountType
   currency   Currency
   mode       Mode
@@ -535,7 +544,8 @@ model LedgerAccount {
   merchant Merchant?     @relation(fields: [merchantId], references: [id], onDelete: Cascade)
   entries  LedgerEntry[]
 
-  @@unique([merchantId, type, currency, mode])
+  @@unique([scopeKey, type, currency, mode])
+  @@index([merchantId, mode, currency])
   @@map("ledger_accounts")
 }
 

@@ -9,8 +9,11 @@ declare global {
 
 function createClient(): PrismaClient {
   return new PrismaClient({
+    // El log de queries se activa a mano, no por estar en desarrollo: con
+    // tráfico real ahoga cualquier otro mensaje y vuelve inservible el log
+    // justo cuando hay que depurar un cobro.
     log:
-      process.env.NODE_ENV === 'development'
+      process.env.PRISMA_LOG_QUERIES === '1'
         ? ['query', 'warn', 'error']
         : ['warn', 'error'],
   });

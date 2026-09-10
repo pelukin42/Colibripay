@@ -17,10 +17,16 @@ const LAST_USED_REFRESH_MS = 5 * 60_000;
 
 @Injectable()
 export class ApiKeyGuard implements CanActivate {
+  // Todos los tokens de inyección son EXPLÍCITOS a propósito. La inyección por
+  // tipo de NestJS depende de la metadata `design:paramtypes` que emite tsc con
+  // `emitDecoratorMetadata`, y esbuild —que es lo que usa tsx en desarrollo— no
+  // la emite. Sin @Inject, estas dependencias llegan `undefined` solo al correr
+  // en dev, mientras el build con tsc funciona: el peor tipo de bug. Con tokens
+  // explícitos funciona igual con tsc, esbuild, swc o cualquier bundler.
   constructor(
     @Inject(PRISMA) private readonly prisma: PrismaClient,
-    private readonly crypto: CryptoService,
-    private readonly reflector: Reflector,
+    @Inject(CryptoService) private readonly crypto: CryptoService,
+    @Inject(Reflector) private readonly reflector: Reflector,
   ) {}
 
   async canActivate(context: ExecutionContext): Promise<boolean> {

@@ -1,4 +1,4 @@
-import { Body, Controller, Get, Param, Post, Req } from '@nestjs/common';
+import { Body, Controller, Get, Inject, Param, Post, Req } from '@nestjs/common';
 import type { Request } from 'express';
 import { ColibriError } from '@colibripay/shared';
 import { AllowPublicKey } from '../auth/secret-key.decorator.js';
@@ -13,7 +13,9 @@ import {
 
 @Controller('v1/payment_intents')
 export class PaymentIntentsController {
-  constructor(private readonly service: PaymentIntentsService) {}
+  constructor(
+    @Inject(PaymentIntentsService) private readonly service: PaymentIntentsService,
+  ) {}
 
   @Post()
   async create(@Req() req: Request, @Body() body: unknown) {

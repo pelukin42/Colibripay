@@ -38,8 +38,8 @@ export class PaymentIntentsService {
 
   constructor(
     @Inject(PRISMA) private readonly prisma: PrismaClient,
-    private readonly ledger: LedgerService,
-    private readonly events: EventsService,
+    @Inject(LedgerService) private readonly ledger: LedgerService,
+    @Inject(EventsService) private readonly events: EventsService,
   ) {}
 
   // -------------------------------------------------------------------------
@@ -135,8 +135,20 @@ export class PaymentIntentsService {
       );
     }
 
-    if (intent.status !== 'REQUIRES_CONFIRMATION') {
-      assertTransitionOrFail(intent.status, 'REQUIRES_CONFIRMATION', intent.publicId);
+    // OJO: cada transición devuelve la fila actualizada y hay que seguir
+    // trabajando sobre ELLA. Reusar el objeto original después de un UPDATE
+    // hace que la siguiente transición valide contra un estado que ya no
+    // existe — y como las transiciones son una cadena, el error aparece dos
+    // pasos más adelante y parece otra cosa.
+    let current: PaymentIntent = intent;
+
+    // Adjuntar el método de pago ES la transición a REQUIRES_CONFIRMATION.
+    // Validarla sin persistirla dejaba el intent en REQUIRES_PAYMENT_METHOD y
+    // el salto a PROCESSING fallaba después.
+    if (current.status !== 'REQUIRES_CONFIRMATION') {
+      current = await this.transition(current, 'REQUIRES_CONFIRMATION', {
+        paymentMethodId: paymentMethod.id,
+      });
     }
 
     const acquirer = selectAcquirer({
@@ -175,7 +187,7 @@ export class PaymentIntentsService {
       },
     });
 
-    await this.transition(intent, 'PROCESSING');
+    current = await this.transition(current, 'PROCESSING');
 
     const result = await acquirer.authorize({
       context,
@@ -192,7 +204,7 @@ export class PaymentIntentsService {
     });
 
     if (result.status === 'declined') {
-      return this.failCharge(auth, intent, charge, {
+      return this.failCharge(auth, current, charge, {
         code: 'card_declined',
         declineCode: result.declineCode,
         message: result.rawMessage ?? 'El cobro fue rechazado',
@@ -201,7 +213,7 @@ export class PaymentIntentsService {
     }
 
     if (result.status === 'error') {
-      return this.failCharge(auth, intent, charge, {
+      return this.failCharge(auth, current, charge, {
         code: result.retryable ? 'processing_error' : 'api_error',
         message: result.message,
         acquirerCode: result.rawCode,
@@ -227,7 +239,7 @@ export class PaymentIntentsService {
         },
       });
 
-      const updated = await this.transition(intent, 'REQUIRES_ACTION', {
+      const updated = await this.transition(current, 'REQUIRES_ACTION', {
         nextAction: nextAction as never,
       });
 
@@ -263,14 +275,14 @@ export class PaymentIntentsService {
       data: { chargeId: charge.publicId, paymentIntentId: intent.publicId },
     });
 
-    if (intent.captureMethod === 'MANUAL') {
-      const updated = await this.transition(intent, 'REQUIRES_CAPTURE', {
-        amountCapturable: intent.amount,
+    if (current.captureMethod === 'MANUAL') {
+      const updated = await this.transition(current, 'REQUIRES_CAPTURE', {
+        amountCapturable: current.amount,
       });
       return toPublicPaymentIntent(updated);
     }
 
-    return this.captureCharge(auth, intent, charge.id, intent.amount, merchant, fee, reserve);
+    return this.captureCharge(auth, current, charge.id, current.amount, merchant, fee, reserve);
   }
 
   // -------------------------------------------------------------------------

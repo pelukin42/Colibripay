@@ -14,6 +14,9 @@ import {
 } from '@colibripay/shared';
 import { PRISMA } from '../common/prisma.provider.js';
 
+/** Valor de `scopeKey` para las cuentas que no pertenecen a ningún comercio. */
+const PLATFORM_SCOPE = 'platform';
+
 /**
  * Persistencia del ledger.
  *
@@ -117,6 +120,11 @@ export class LedgerService {
   /**
    * Busca o crea la cuenta. El upsert evita la carrera clásica de "existe? no?
    * la creo" entre dos cobros simultáneos de un comercio nuevo.
+   *
+   * La búsqueda va por `scopeKey`, no por `merchantId`: las cuentas de
+   * plataforma tienen merchantId nulo y Postgres no aplica unicidad sobre
+   * NULLs, así que un índice con la columna nullable permitiría duplicados
+   * silenciosos. Ver el comentario del modelo en schema.prisma.
    */
   private async resolveAccount(
     tx: Prisma.TransactionClient,
@@ -127,18 +135,19 @@ export class LedgerService {
       mode: Mode;
     },
   ): Promise<string> {
-    const where = {
-      merchantId_type_currency_mode: {
-        merchantId: params.merchantId,
-        type: params.type,
-        currency: params.currency,
-        mode: params.mode,
-      },
-    } as unknown as Prisma.LedgerAccountWhereUniqueInput;
+    const scopeKey = params.merchantId ?? PLATFORM_SCOPE;
 
     const account = await tx.ledgerAccount.upsert({
-      where,
+      where: {
+        scopeKey_type_currency_mode: {
+          scopeKey,
+          type: params.type,
+          currency: params.currency,
+          mode: params.mode,
+        },
+      },
       create: {
+        scopeKey,
         merchantId: params.merchantId,
         type: params.type,
         currency: params.currency,
