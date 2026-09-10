@@ -1,0 +1,767 @@
+// ColibriPay — esquema del core de pagos
+//
+// Convenciones que aplican a TODO el archivo:
+//   * Los montos son BigInt en unidades mínimas (céntimos). Nunca Float, nunca Decimal
+//     en la ruta caliente: los flotantes pierden plata y los decimales invitan a redondeos
+//     inconsistentes entre lenguajes.
+//   * `mode` (TEST/LIVE) separa los datos de prueba de los reales. Ningún query del core
+//     debe cruzar modos. Es la razón de que aparezca en casi todos los modelos.
+//   * Este esquema NO almacena PAN, CVV ni pistas de banda magnética en ningún campo.
+//     Solo referencias tokenizadas del adquirente. Es lo que mantiene el alcance en SAQ A.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ---------------------------------------------------------------------------
+// Enums
+// ---------------------------------------------------------------------------
+
+enum Mode {
+  TEST
+  LIVE
+}
+
+enum Currency {
+  CRC
+  USD
+}
+
+enum MerchantStatus {
+  PENDING // creado, sin revisar
+  ACTIVE // puede cobrar en LIVE
+  RESTRICTED // puede cobrar, pero los payouts están retenidos
+  SUSPENDED
+  REJECTED
+}
+
+enum MemberRole {
+  OWNER
+  ADMIN
+  DEVELOPER
+  VIEWER
+}
+
+enum ApiKeyType {
+  PUBLIC // pk_ — se expone en el navegador, solo puede crear tokens y leer el intent por client_secret
+  SECRET // sk_ — servidor a servidor, acceso completo
+}
+
+/// Máquina de estados del PaymentIntent. Las transiciones válidas están declaradas
+/// en packages/shared/src/payment-intent.ts y se validan en el servicio, no acá.
+enum PaymentIntentStatus {
+  REQUIRES_PAYMENT_METHOD
+  REQUIRES_CONFIRMATION
+  REQUIRES_ACTION // 3DS, redirección, o esperando SINPE del cliente
+  PROCESSING
+  REQUIRES_CAPTURE // autorizado, pendiente de captura manual
+  SUCCEEDED
+  CANCELED
+  FAILED
+}
+
+enum CaptureMethod {
+  AUTOMATIC
+  MANUAL
+}
+
+enum PaymentMethodType {
+  CARD
+  SINPE_MOVIL
+  BANK_TRANSFER
+}
+
+enum ChargeStatus {
+  PENDING
+  AUTHORIZED
+  CAPTURED
+  FAILED
+  REVERSED // anulada antes del cierre de lote
+}
+
+enum RefundStatus {
+  PENDING
+  SUCCEEDED
+  FAILED
+  CANCELED
+}
+
+enum DisputeStatus {
+  NEEDS_RESPONSE
+  UNDER_REVIEW
+  WON
+  LOST
+  CANCELED
+}
+
+enum RiskOutcome {
+  APPROVED
+  REVIEW
+  BLOCKED
+}
+
+/// Plan contable. Un cargo exitoso mueve plata entre estas cuentas y la suma
+/// de cada transacción debe dar exactamente cero.
+enum LedgerAccountType {
+  ACQUIRER_RECEIVABLE // lo que el adquirente nos debe hasta que liquide
+  MERCHANT_PENDING // fondos del comercio aún en periodo de retención (T+N)
+  MERCHANT_AVAILABLE // fondos del comercio listos para payout
+  PLATFORM_FEE_REVENUE // nuestra comisión
+  PAYOUTS_PAYABLE // payouts emitidos y no liquidados
+  RESERVE // reserva de riesgo retenida al comercio
+  CHARGEBACK_LOSS // pérdidas absorbidas por la plataforma
+}
+
+enum LedgerTransactionKind {
+  CHARGE_CAPTURED
+  CHARGE_REFUNDED
+  FEE_APPLIED
+  FUNDS_RELEASED // PENDING -> AVAILABLE al vencer la retención
+  PAYOUT_CREATED
+  PAYOUT_SETTLED
+  PAYOUT_FAILED
+  DISPUTE_OPENED
+  DISPUTE_WON
+  DISPUTE_LOST
+  ADJUSTMENT
+}
+
+enum PayoutStatus {
+  PENDING
+  IN_TRANSIT
+  PAID
+  FAILED
+  CANCELED
+}
+
+enum WebhookEndpointStatus {
+  ENABLED
+  DISABLED
+  AUTO_DISABLED // apagado por fallos consecutivos
+}
+
+enum WebhookDeliveryStatus {
+  PENDING
+  SUCCEEDED
+  FAILED
+  EXHAUSTED // se agotaron los reintentos
+}
+
+// ---------------------------------------------------------------------------
+// Comercios, usuarios y credenciales
+// ---------------------------------------------------------------------------
+
+model Merchant {
+  id        String         @id @default(cuid())
+  publicId  String         @unique // mch_xxx — el que se ve en el dashboard y los logs
+  legalName String
+  tradeName String
+  taxId     String // cédula jurídica o física
+  country   String         @default("CR")
+  email     String
+  phone     String?
+  website   String?
+  status    MerchantStatus @default(PENDING)
+
+  defaultCurrency     Currency @default(CRC)
+  /// Aparece en el estado de cuenta del tarjetahabiente. Máx. 22 caracteres por regla de red.
+  statementDescriptor String
+
+  // Comisión: bps sobre el monto + fijo en unidades mínimas.
+  // 290 bps + 10000 céntimos = 2.90% + ₡100.
+  feeBps      Int @default(290)
+  feeFixed    BigInt @default(0)
+  /// Días de retención antes de que los fondos pasen a MERCHANT_AVAILABLE (T+N).
+  holdDays    Int @default(2)
+  /// Porcentaje en bps que se retiene en RESERVE sobre cada cargo.
+  reserveBps  Int @default(0)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  members          MerchantMember[]
+  apiKeys          ApiKey[]
+  customers        Customer[]
+  paymentMethods   PaymentMethod[]
+  paymentIntents   PaymentIntent[]
+  charges          Charge[]
+  refunds          Refund[]
+  disputes         Dispute[]
+  ledgerAccounts   LedgerAccount[]
+  ledgerTxns       LedgerTransaction[]
+  payouts          Payout[]
+  bankAccounts     BankAccount[]
+  webhookEndpoints WebhookEndpoint[]
+  events           Event[]
+  idempotencyKeys  IdempotencyKey[]
+
+  @@index([status])
+  @@map("merchants")
+}
+
+model User {
+  id           String   @id @default(cuid())
+  email        String   @unique
+  name         String
+  passwordHash String
+  /// TOTP cifrado con ENCRYPTION_KEY. Obligatorio para roles OWNER/ADMIN en LIVE.
+  totpSecret   String?
+  totpEnabled  Boolean  @default(false)
+  lastLoginAt  DateTime?
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  memberships MerchantMember[]
+
+  @@map("users")
+}
+
+model MerchantMember {
+  id         String     @id @default(cuid())
+  merchantId String
+  userId     String
+  role       MemberRole @default(VIEWER)
+  createdAt  DateTime   @default(now())
+
+  merchant Merchant @relation(fields: [merchantId], references: [id], onDelete: Cascade)
+  user     User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([merchantId, userId])
+  @@map("merchant_members")
+}
+
+model ApiKey {
+  id         String     @id @default(cuid())
+  merchantId String
+  type       ApiKeyType
+  mode       Mode
+  name       String     @default("Default")
+
+  /// Prefijo visible: "sk_test", "pk_live". Se usa para enrutar sin desencriptar.
+  prefix     String
+  /// Últimos 4 caracteres, para que el comercio identifique la llave en la UI.
+  lastFour   String
+  /// Argon2id de la llave completa. La llave en claro se muestra UNA sola vez.
+  /// Las públicas (pk_) también se hashean: no son secretas, pero el lookup es idéntico.
+  hashedKey  String     @unique
+
+  lastUsedAt DateTime?
+  revokedAt  DateTime?
+  createdAt  DateTime   @default(now())
+
+  merchant Merchant @relation(fields: [merchantId], references: [id], onDelete: Cascade)
+
+  @@index([merchantId, mode, revokedAt])
+  @@map("api_keys")
+}
+
+// ---------------------------------------------------------------------------
+// Clientes y métodos de pago tokenizados
+// ---------------------------------------------------------------------------
+
+model Customer {
+  id         String  @id @default(cuid())
+  publicId   String  @unique // cus_xxx
+  merchantId String
+  mode       Mode
+  email      String?
+  name       String?
+  phone      String?
+  /// Identificador del cliente en el sistema del comercio.
+  externalId String?
+  metadata   Json    @default("{}")
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  merchant       Merchant        @relation(fields: [merchantId], references: [id], onDelete: Cascade)
+  paymentMethods PaymentMethod[]
+  paymentIntents PaymentIntent[]
+
+  @@unique([merchantId, mode, externalId])
+  @@index([merchantId, mode, email])
+  @@map("customers")
+}
+
+/// Bóveda de métodos de pago. Contiene únicamente metadatos no sensibles más la
+/// referencia opaca del adquirente. Si algún día aparece un campo `pan` acá,
+/// el alcance PCI del proyecto se multiplica: no lo agregues.
+model PaymentMethod {
+  id         String            @id @default(cuid())
+  publicId   String            @unique // pm_xxx
+  merchantId String
+  mode       Mode
+  customerId String?
+  type       PaymentMethodType
+
+  // --- Tarjeta (todos nulos para otros tipos) ---
+  brand    String? // visa, mastercard, amex
+  last4    String?
+  expMonth Int?
+  expYear  Int?
+  /// BIN de 6-8 dígitos. Sirve para ruteo por adquirente y reglas de riesgo.
+  /// No es dato de tarjeta reconstruible por sí solo.
+  bin      String?
+  /// Huella estable de la tarjeta que da el adquirente. Permite detectar
+  /// la misma tarjeta entre clientes sin guardar el número.
+  fingerprint String?
+  /// Resultado de la verificación del emisor en la tokenización.
+  cvcCheck    String?
+
+  // --- SINPE Móvil ---
+  phoneNumber String?
+  bankName    String?
+
+  /// Token opaco emitido por el adquirente. Es lo único con lo que se puede cobrar.
+  acquirerToken   String?
+  acquirerAdapter String?
+
+  billingName    String?
+  billingEmail   String?
+  billingCountry String? @default("CR")
+
+  detachedAt DateTime?
+  createdAt  DateTime  @default(now())
+  updatedAt  DateTime  @updatedAt
+
+  merchant       Merchant        @relation(fields: [merchantId], references: [id], onDelete: Cascade)
+  customer       Customer?       @relation(fields: [customerId], references: [id], onDelete: SetNull)
+  paymentIntents PaymentIntent[]
+  charges        Charge[]
+
+  @@index([merchantId, mode, customerId])
+  @@index([fingerprint])
+  @@map("payment_methods")
+}
+
+// ---------------------------------------------------------------------------
+// Intents, cargos, reembolsos, contracargos
+// ---------------------------------------------------------------------------
+
+model PaymentIntent {
+  id         String              @id @default(cuid())
+  publicId   String              @unique // pi_xxx
+  merchantId String
+  mode       Mode
+  status     PaymentIntentStatus @default(REQUIRES_PAYMENT_METHOD)
+
+  amount           BigInt
+  currency         Currency
+  amountReceived   BigInt   @default(0)
+  amountCapturable BigInt   @default(0)
+  amountRefunded   BigInt   @default(0)
+
+  captureMethod CaptureMethod @default(AUTOMATIC)
+
+  customerId      String?
+  paymentMethodId String?
+  /// Guardar el método para futuros cobros al confirmar este intent.
+  setupFutureUsage Boolean @default(false)
+
+  description         String?
+  statementDescriptor String?
+  metadata            Json    @default("{}")
+
+  /// Secreto del lado cliente: pi_xxx_secret_yyy. Autoriza al checkout a leer y
+  /// confirmar ESTE intent sin llave secreta. Se compara en tiempo constante.
+  clientSecret String @unique
+
+  /// Qué debe hacer el cliente a continuación: redirigir a 3DS, mostrar
+  /// instrucciones SINPE, etc. Estructura en shared/src/next-action.ts.
+  nextAction Json?
+  /// Último error, en el mismo formato que devuelve la API pública.
+  lastError  Json?
+
+  returnUrl String?
+  /// Los intents no confirmados se vencen para no dejar autorizaciones colgando.
+  expiresAt DateTime?
+  canceledAt DateTime?
+  succeededAt DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  merchant      Merchant       @relation(fields: [merchantId], references: [id], onDelete: Cascade)
+  customer      Customer?      @relation(fields: [customerId], references: [id], onDelete: SetNull)
+  paymentMethod PaymentMethod? @relation(fields: [paymentMethodId], references: [id], onDelete: SetNull)
+  charges       Charge[]
+
+  @@index([merchantId, mode, status])
+  @@index([merchantId, mode, createdAt])
+  @@index([status, expiresAt])
+  @@map("payment_intents")
+}
+
+/// Un intento concreto contra el adquirente. Un PaymentIntent puede tener varios
+/// (reintento tras rechazo suave, reruteo a otro adquirente, etc.). Guardar cada
+/// intento por separado es lo que hace posible la conciliación y el análisis de
+/// tasas de aprobación.
+model Charge {
+  id              String       @id @default(cuid())
+  publicId        String       @unique // ch_xxx
+  merchantId      String
+  mode            Mode
+  paymentIntentId String
+  paymentMethodId String?
+  status          ChargeStatus @default(PENDING)
+
+  amount   BigInt
+  currency Currency
+  /// Comisión aplicada por la plataforma a este cargo.
+  feeAmount BigInt  @default(0)
+  /// amount - feeAmount. Lo que efectivamente le entra al comercio.
+  netAmount BigInt  @default(0)
+
+  // --- Respuesta del adquirente ---
+  acquirerAdapter  String // "sandbox", "bac", "promerica"...
+  acquirerChargeId String?
+  authCode         String?
+  /// Retrieval Reference Number — la clave para conciliar contra el estado del banco.
+  rrn              String?
+  responseCode     String?
+  responseMessage  String?
+  /// Respuesta cruda del adquirente, ya saneada de datos sensibles.
+  rawResponse      Json?
+
+  // --- Riesgo ---
+  riskScore   Int?
+  riskOutcome RiskOutcome?
+  riskReasons String[]     @default([])
+
+  // --- Contexto de la transacción (evidencia ante contracargos) ---
+  ipAddress String?
+  userAgent String?
+
+  authorizedAt DateTime?
+  capturedAt   DateTime?
+  failedAt     DateTime?
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+
+  merchant      Merchant       @relation(fields: [merchantId], references: [id], onDelete: Cascade)
+  paymentIntent PaymentIntent  @relation(fields: [paymentIntentId], references: [id], onDelete: Cascade)
+  paymentMethod PaymentMethod? @relation(fields: [paymentMethodId], references: [id], onDelete: SetNull)
+  refunds       Refund[]
+  disputes      Dispute[]
+
+  @@index([merchantId, mode, status])
+  @@index([acquirerChargeId])
+  @@index([rrn])
+  @@map("charges")
+}
+
+model Refund {
+  id         String       @id @default(cuid())
+  publicId   String       @unique // re_xxx
+  merchantId String
+  mode       Mode
+  chargeId   String
+  status     RefundStatus @default(PENDING)
+
+  amount   BigInt
+  currency Currency
+  reason   String?
+  metadata Json     @default("{}")
+
+  acquirerRefundId String?
+  failureReason    String?
+
+  succeededAt DateTime?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  merchant Merchant @relation(fields: [merchantId], references: [id], onDelete: Cascade)
+  charge   Charge   @relation(fields: [chargeId], references: [id], onDelete: Cascade)
+
+  @@index([merchantId, mode, status])
+  @@map("refunds")
+}
+
+model Dispute {
+  id         String        @id @default(cuid())
+  publicId   String        @unique // dp_xxx
+  merchantId String
+  mode       Mode
+  chargeId   String
+  status     DisputeStatus @default(NEEDS_RESPONSE)
+
+  amount   BigInt
+  currency Currency
+  /// Código de razón de la red (ej. Visa 13.1 "mercadería no recibida").
+  reasonCode String?
+  reason     String?
+
+  evidenceDueBy DateTime?
+  evidence      Json      @default("{}")
+  submittedAt   DateTime?
+  resolvedAt    DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  merchant Merchant @relation(fields: [merchantId], references: [id], onDelete: Cascade)
+  charge   Charge   @relation(fields: [chargeId], references: [id], onDelete: Cascade)
+
+  @@index([merchantId, mode, status])
+  @@map("disputes")
+}
+
+// ---------------------------------------------------------------------------
+// Contabilidad de doble partida
+// ---------------------------------------------------------------------------
+
+/// Una cuenta por (comercio, tipo, moneda). Las cuentas de plataforma
+/// (PLATFORM_FEE_REVENUE, ACQUIRER_RECEIVABLE) llevan merchantId nulo.
+model LedgerAccount {
+  id         String            @id @default(cuid())
+  merchantId String?
+  type       LedgerAccountType
+  currency   Currency
+  mode       Mode
+
+  /// Saldo materializado, mantenido dentro de la misma transacción que los asientos.
+  /// Es una caché: la fuente de verdad es SUM(ledger_entries.amount).
+  /// scripts/verify-ledger.ts recalcula y compara.
+  balance BigInt @default(0)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  merchant Merchant?     @relation(fields: [merchantId], references: [id], onDelete: Cascade)
+  entries  LedgerEntry[]
+
+  @@unique([merchantId, type, currency, mode])
+  @@map("ledger_accounts")
+}
+
+/// Agrupa los asientos de un mismo hecho económico. Invariante inviolable:
+/// SUM(entries.amount) = 0. Se valida en el servicio y con un constraint diferido
+/// en la migración, en el archivo ledger_balance_check.sql.
+///
+/// (Ojo al escribir estos comentarios: Prisma los copia tal cual dentro de un
+/// bloque JSDoc del cliente generado, así que una secuencia de cierre de
+/// comentario acá adentro rompe la compilación de todo el paquete.)
+model LedgerTransaction {
+  id         String                @id @default(cuid())
+  publicId   String                @unique // ltx_xxx
+  merchantId String?
+  mode       Mode
+  kind       LedgerTransactionKind
+  currency   Currency
+
+  /// A qué objeto del dominio corresponde: "charge", "refund", "payout", "dispute".
+  referenceType String
+  referenceId   String
+  description   String?
+
+  createdAt DateTime @default(now())
+
+  merchant Merchant?     @relation(fields: [merchantId], references: [id], onDelete: Cascade)
+  entries  LedgerEntry[]
+
+  @@unique([kind, referenceType, referenceId])
+  @@index([merchantId, mode, createdAt])
+  @@map("ledger_transactions")
+}
+
+/// Convención de signo: amount positivo = DÉBITO, negativo = CRÉDITO.
+/// Un solo campo con signo hace que "la transacción cuadra" sea literalmente
+/// SUM(amount) = 0, sin depender de interpretar un enum de dirección.
+model LedgerEntry {
+  id            String @id @default(cuid())
+  transactionId String
+  accountId     String
+  amount        BigInt
+
+  createdAt DateTime @default(now())
+
+  transaction LedgerTransaction @relation(fields: [transactionId], references: [id], onDelete: Cascade)
+  account     LedgerAccount     @relation(fields: [accountId], references: [id], onDelete: Restrict)
+
+  @@index([accountId, createdAt])
+  @@index([transactionId])
+  @@map("ledger_entries")
+}
+
+// ---------------------------------------------------------------------------
+// Liquidaciones
+// ---------------------------------------------------------------------------
+
+model BankAccount {
+  id         String @id @default(cuid())
+  publicId   String @unique // ba_xxx
+  merchantId String
+  holderName String
+  /// IBAN costarricense (CR + 20 dígitos), cifrado en reposo con ENCRYPTION_KEY.
+  ibanEncrypted String
+  /// Últimos 4 para mostrar en la UI sin desencriptar.
+  ibanLast4     String
+  bankName      String
+  currency      Currency
+
+  verifiedAt DateTime?
+  isDefault  Boolean   @default(false)
+  createdAt  DateTime  @default(now())
+
+  merchant Merchant @relation(fields: [merchantId], references: [id], onDelete: Cascade)
+  payouts  Payout[]
+
+  @@index([merchantId])
+  @@map("bank_accounts")
+}
+
+model Payout {
+  id            String       @id @default(cuid())
+  publicId      String       @unique // po_xxx
+  merchantId    String
+  mode          Mode
+  bankAccountId String
+  status        PayoutStatus @default(PENDING)
+
+  amount   BigInt
+  currency Currency
+
+  /// Rango de cargos que cubre este payout. Es lo que le permite al comercio
+  /// cuadrar un depósito bancario contra sus ventas.
+  periodStart DateTime
+  periodEnd   DateTime
+
+  expectedArrivalDate DateTime?
+  failureReason       String?
+  /// Referencia del envío SINPE/transferencia.
+  bankReference       String?
+
+  paidAt    DateTime?
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+
+  merchant    Merchant    @relation(fields: [merchantId], references: [id], onDelete: Cascade)
+  bankAccount BankAccount @relation(fields: [bankAccountId], references: [id], onDelete: Restrict)
+
+  @@index([merchantId, mode, status])
+  @@map("payouts")
+}
+
+// ---------------------------------------------------------------------------
+// Eventos y webhooks
+// ---------------------------------------------------------------------------
+
+/// Log inmutable de todo lo que le pasa a un comercio. Los webhooks son solo
+/// una forma de entrega; el evento existe aunque no haya endpoint configurado.
+model Event {
+  id         String @id @default(cuid())
+  publicId   String @unique // evt_xxx
+  merchantId String
+  mode       Mode
+  /// "payment_intent.succeeded", "charge.refunded", "dispute.created"...
+  type       String
+  apiVersion String @default("2026-01-01")
+  /// Snapshot del objeto serializado tal como lo devuelve la API pública.
+  data       Json
+
+  createdAt DateTime @default(now())
+
+  merchant   Merchant          @relation(fields: [merchantId], references: [id], onDelete: Cascade)
+  deliveries WebhookDelivery[]
+
+  @@index([merchantId, mode, type, createdAt])
+  @@map("events")
+}
+
+model WebhookEndpoint {
+  id         String                @id @default(cuid())
+  publicId   String                @unique // we_xxx
+  merchantId String
+  mode       Mode
+  url        String
+  status     WebhookEndpointStatus @default(ENABLED)
+  description String?
+
+  /// Secreto de firma (whsec_...), cifrado con ENCRYPTION_KEY.
+  /// A diferencia de las API keys, este se necesita en claro para firmar,
+  /// así que se cifra en vez de hashearse.
+  secretEncrypted String
+  /// Vacío = suscrito a todos los eventos.
+  enabledEvents   String[] @default([])
+
+  consecutiveFailures Int       @default(0)
+  lastSuccessAt       DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  merchant   Merchant          @relation(fields: [merchantId], references: [id], onDelete: Cascade)
+  deliveries WebhookDelivery[]
+
+  @@index([merchantId, mode, status])
+  @@map("webhook_endpoints")
+}
+
+model WebhookDelivery {
+  id         String                @id @default(cuid())
+  endpointId String
+  eventId    String
+  status     WebhookDeliveryStatus @default(PENDING)
+
+  attempt      Int     @default(0)
+  responseCode Int?
+  /// Truncado a 2KB. Solo para que el comercio depure su endpoint.
+  responseBody String?
+  error        String?
+  durationMs   Int?
+
+  nextRetryAt DateTime?
+  deliveredAt DateTime?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  endpoint WebhookEndpoint @relation(fields: [endpointId], references: [id], onDelete: Cascade)
+  event    Event           @relation(fields: [eventId], references: [id], onDelete: Cascade)
+
+  @@unique([endpointId, eventId])
+  @@index([status, nextRetryAt])
+  @@map("webhook_deliveries")
+}
+
+// ---------------------------------------------------------------------------
+// Idempotencia
+// ---------------------------------------------------------------------------
+
+/// Sin esto, un reintento de red del comercio cobra dos veces. Es el registro
+/// más importante de la API después del ledger.
+///
+/// Flujo: se inserta con lockedAt al recibir la petición (el unique actúa de
+/// mutex distribuido); si otra petición choca con la misma llave y aún no hay
+/// respuesta, se devuelve 409. Al terminar se guarda la respuesta y los
+/// reintentos posteriores la reproducen tal cual.
+model IdempotencyKey {
+  id         String @id @default(cuid())
+  merchantId String
+  key        String
+  mode       Mode
+
+  method String
+  path   String
+  /// SHA-256 del cuerpo. Si la misma llave llega con otro cuerpo, es un error
+  /// del cliente (422), no un reintento.
+  requestHash String
+
+  responseStatus Int?
+  responseBody   Json?
+
+  lockedAt    DateTime  @default(now())
+  completedAt DateTime?
+  /// Las llaves se purgan a las 24h, igual que hace la industria.
+  expiresAt   DateTime
+
+  merchant Merchant @relation(fields: [merchantId], references: [id], onDelete: Cascade)
+
+  @@unique([merchantId, key])
+  @@index([expiresAt])
+  @@map("idempotency_keys")
+}
