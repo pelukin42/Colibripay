@@ -12,6 +12,8 @@ import { PaymentIntentsController } from './payment-intents/payment-intents.cont
 import { PaymentIntentsService } from './payment-intents/payment-intents.service.js';
 import { PaymentMethodsController } from './payment-methods/payment-methods.controller.js';
 import { PaymentMethodsService } from './payment-methods/payment-methods.service.js';
+import { WebhookDeliveryService } from './webhooks/webhook-delivery.service.js';
+import { WebhookWorker } from './webhooks/webhook.worker.js';
 import { HealthController } from './health.controller.js';
 
 @Module({
@@ -23,6 +25,8 @@ import { HealthController } from './health.controller.js';
     EventsService,
     PaymentIntentsService,
     PaymentMethodsService,
+    WebhookDeliveryService,
+    WebhookWorker,
 
     // El guard es GLOBAL a propósito. Si la autenticación se aplicara ruta por
     // ruta, el día que alguien agregue un endpoint y olvide el decorador

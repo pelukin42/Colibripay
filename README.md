@@ -51,6 +51,7 @@ apps/
 4. **Toda escritura pasa por idempotencia.** Sin eso, un reintento de red del comercio cobra dos veces.
 5. **El ledger es de doble partida y cuadra o no se escribe.** `SUM(entries.amount) = 0`, con signo: positivo = débito, negativo = crédito.
 6. **`TEST` y `LIVE` nunca se cruzan.** Por eso `mode` está en casi todos los modelos.
+7. **Los webhooks son *at-least-once*.** Si la red se corta después de que el comercio respondió 200, reintentamos. El comercio DEBE descartar eventos repetidos por `id`. Prometer *exactly-once* sobre HTTP es mentira.
 
 ---
 
@@ -96,6 +97,34 @@ pnpm --filter @colibripay/api dev
 
 ---
 
+## Webhooks
+
+La cola vive en Postgres, no en Redis. Es una decisión: la tabla `webhook_deliveries` ya tiene estado, intentos y próxima ejecución — ya *es* una cola. Duplicarla en Redis traería el problema de la escritura dual: fila commiteada con job perdido es un webhook que nunca sale; job encolado sin fila es uno duplicado. Con `FOR UPDATE SKIP LOCKED` varios workers se reparten el trabajo sin coordinación externa.
+
+El techo son unos cuantos miles de entregas por segundo — muy por encima de lo que necesita una pasarela costarricense.
+
+**Firma.** Cabecera `colibri-signature: t=<unix>,v1=<hmac-sha256-hex>`. El timestamp va *dentro* de lo firmado (`${t}.${cuerpo}`), así que reenviar una entrega vieja con hora nueva invalida la firma. Tolerancia: 5 minutos.
+
+Verificación del lado del comercio — ver [scripts/webhook-receiver.ts](scripts/webhook-receiver.ts) para el ejemplo completo:
+
+```ts
+const result = await verifyWebhookSignature({ payload: cuerpoCrudo, header, secret });
+```
+
+> El `payload` debe ser el cuerpo **crudo**, no el JSON parseado y vuelto a serializar. Un espacio de diferencia cambia el HMAC.
+
+**Reintentos.** 8 intentos con backoff creciente: inmediato, 10 s, 1 min, 5 min, 30 min, 2 h, 6 h, 18 h. Un endpoint caído se recupera solo dentro de las ~26 horas siguientes sin perder eventos. Tras 20 fallos consecutivos el endpoint se apaga solo.
+
+**Probarlo localmente:**
+
+```bash
+WEBHOOK_SECRET=whsec_... pnpm webhook:receiver
+```
+
+Con `FAIL_TIMES=3` rechaza las primeras 3 entregas para ver los reintentos.
+
+---
+
 ## Tarjetas de prueba
 
 El adaptador sandbox es determinista: el mismo número produce siempre el mismo resultado.
@@ -129,7 +158,8 @@ Las últimas cuatro existen porque son los casos que rompen integraciones mal he
 - **Contratos compartidos** — aritmética monetaria, IDs con prefijo, errores y rechazos, eventos, máquina de estados del PaymentIntent
 - **Reglas de asiento contable** — funciones puras, con una prueba que corre 1000 operaciones aleatorias verificando en cada paso que el libro suma cero
 - **Interfaz `AcquirerAdapter` y adaptador sandbox** — tokenización, autorización, 3DS, captura parcial, anulación, reembolso. Sin estado
-- **API** — autenticación por llave de API, idempotencia, ledger persistente, eventos, y el recurso `payment_intents` completo
+- **API** — autenticación por llave de API, idempotencia, ledger persistente, eventos, `payment_intents` y `payment_methods`
+- **Webhooks** — cola en Postgres con `SKIP LOCKED`, firma HMAC-SHA256, 8 reintentos con backoff, apagado automático de endpoints muertos y filtro anti-SSRF
 
 ### Endpoints
 
@@ -147,7 +177,6 @@ Las últimas cuatro existen porque son los casos que rompen integraciones mal he
 
 **Pendiente:**
 
-- Worker de webhooks (BullMQ) con firma HMAC — el backoff ya está definido
 - Recursos `customers` y `refunds`
 - Job de liberación de fondos T+N y payouts
 - `apps/checkout` — checkout hospedado con campos en iframe

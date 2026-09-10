@@ -19,13 +19,16 @@
     "db:studio": "pnpm --filter @colibripay/db studio",
     "clean": "turbo run clean && rimraf node_modules",
     "db:local": "pnpm --filter @colibripay/db postgres",
-    "db:verify-ledger": "pnpm --filter @colibripay/db verify-ledger"
+    "db:verify-ledger": "pnpm --filter @colibripay/db verify-ledger",
+    "webhook:receiver": "tsx scripts/webhook-receiver.ts"
   },
   "devDependencies": {
     "@types/node": "^22.10.5",
     "prettier": "^3.4.2",
     "rimraf": "^6.0.1",
     "turbo": "^2.3.3",
-    "typescript": "^5.7.3"
+    "typescript": "^5.7.3",
+    "tsx": "^4.19.2",
+    "@colibripay/shared": "workspace:*"
   }
 }

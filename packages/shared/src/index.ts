@@ -5,3 +5,4 @@ export * from './events.js';
 export * from './payment-intent.js';
 export * from './acquirer.js';
 export * from './ledger.js';
+export * from './webhook-signature.js';
