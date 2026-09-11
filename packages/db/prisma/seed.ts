@@ -27,18 +27,26 @@ function randomString(length: number): string {
 async function main(): Promise<void> {
   const merchant = await prisma.merchant.upsert({
     where: { publicId: 'mch_demo_colibri' },
-    update: {},
+    // Igual que con la contraseña: con `update: {}` un comercio ya existente
+    // conservaba la configuración vieja y el seed mentía sobre lo que dejaba
+    // en la base. La tarifa en particular importa, porque está regulada.
+    update: { feeBps: 150, feeFixed: 0n, status: 'ACTIVE' },
     create: {
       publicId: 'mch_demo_colibri',
       legalName: 'Comercio Demo S.A.',
       tradeName: 'Comercio Demo',
-      taxId: '3101999999',
+      taxId: '3101999999', // cédula jurídica: 10 dígitos empezando en 3
       email: 'demo@colibripay.test',
       status: 'ACTIVE',
       defaultCurrency: 'CRC',
       statementDescriptor: 'COMERCIO DEMO',
-      feeBps: 290,
-      feeFixed: 10_000n, // ₡100
+      // Costa Rica REGULA este número: la Ley 9831 faculta al BCCR a fijar el
+      // tope de la comisión de adquirencia. El 2,90 % + ₡100 que había acá
+      // antes era un invento tomado de pasarelas de otros países y muy
+      // probablemente ilegal en CR. Este valor es conservador a propósito;
+      // el real hay que tomarlo de la resolución vigente del BCCR.
+      feeBps: 150,
+      feeFixed: 0n,
       holdDays: 2,
       reserveBps: 0,
     },
@@ -109,7 +117,10 @@ async function main(): Promise<void> {
 
   console.log('\n  Comercio demo listo.\n');
   console.log(`  Comercio:  ${merchant.publicId}`);
-  console.log(`  Usuario:   ${user.email}\n`);
+  console.log(`  Dashboard: ${user.email} / ${DEMO_PASSWORD}`);
+  console.log(
+    `  Comisión:  ${merchant.feeBps / 100} % — tope regulado por el BCCR (Ley 9831)\n`,
+  );
   console.log('  Llaves de API (guardalas, no se vuelven a mostrar):\n');
   for (const key of created) console.log(`    ${key}`);
   console.log(`\n  Secreto de webhook:\n    ${webhookSecret}\n`);

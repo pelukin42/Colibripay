@@ -7,7 +7,8 @@
 //   * `mode` (TEST/LIVE) separa los datos de prueba de los reales. Ningún query del core
 //     debe cruzar modos. Es la razón de que aparezca en casi todos los modelos.
 //   * Este esquema NO almacena PAN, CVV ni pistas de banda magnética en ningún campo.
-//     Solo referencias tokenizadas del adquirente. Es lo que mantiene el alcance en SAQ A.
+//     Solo referencias tokenizadas del adquirente: el PAN va del navegador al vault
+//     del adquirente sin pasar por nuestros servidores.
 
 generator client {
   provider = "prisma-client-js"
@@ -161,7 +162,10 @@ model Merchant {
   publicId  String         @unique // mch_xxx — el que se ve en el dashboard y los logs
   legalName String
   tradeName String
-  taxId     String // cédula jurídica o física
+  /// Cédula jurídica (10 dígitos, empieza en 3), física (9 dígitos),
+  /// DIMEX o NITE. Se valida la forma con classifyTaxId(); que esté inscrita
+  /// y activa lo confirma el KYC contra el Registro Nacional o Hacienda.
+  taxId     String
   country   String         @default("CR")
   email     String
   phone     String?
@@ -172,9 +176,17 @@ model Merchant {
   /// Aparece en el estado de cuenta del tarjetahabiente. Máx. 22 caracteres por regla de red.
   statementDescriptor String
 
-  // Comisión: bps sobre el monto + fijo en unidades mínimas.
-  // 290 bps + 10000 céntimos = 2.90% + ₡100.
-  feeBps      Int @default(290)
+  /// Comisión de adquirencia: bps sobre el monto más un fijo en unidades mínimas.
+  ///
+  /// ATENCIÓN: en Costa Rica este número NO es libre. La Ley 9831 faculta al
+  /// BCCR a fijar el tope máximo de la comisión de adquirencia, y lo revisa
+  /// periódicamente. Cobrar por encima expone a sanción.
+  ///
+  /// El default es deliberadamente conservador: si alguien crea un comercio sin
+  /// especificar tarifa, el sistema cobra de menos —un problema de negocio— en
+  /// vez de cobrar de más, que es un problema legal. El valor real se toma de la
+  /// resolución vigente del BCCR. Ver checkAcquiringFee() en @colibripay/shared.
+  feeBps      Int @default(150)
   feeFixed    BigInt @default(0)
   /// Días de retención antes de que los fondos pasen a MERCHANT_AVAILABLE (T+N).
   holdDays    Int @default(2)
@@ -246,7 +258,9 @@ model ApiKey {
   prefix     String
   /// Últimos 4 caracteres, para que el comercio identifique la llave en la UI.
   lastFour   String
-  /// Argon2id de la llave completa. La llave en claro se muestra UNA sola vez.
+  /// SHA-256 de la llave completa. La llave en claro se muestra UNA sola vez.
+  /// Ver el razonamiento en packages/db/src/api-keys.ts (alta entropía, no
+  /// hace falta una función lenta; las contraseñas de usuario sí usan scrypt).
   /// Las públicas (pk_) también se hashean: no son secretas, pero el lookup es idéntico.
   hashedKey  String     @unique
 
@@ -607,7 +621,8 @@ model BankAccount {
   publicId   String @unique // ba_xxx
   merchantId String
   holderName String
-  /// IBAN costarricense (CR + 20 dígitos), cifrado en reposo con ENCRYPTION_KEY.
+  /// IBAN costarricense: 22 caracteres (CR + 2 dígitos de control + 18 de
+  /// cuenta), validado con mod-97 y cifrado en reposo con ENCRYPTION_KEY.
   ibanEncrypted String
   /// Últimos 4 para mostrar en la UI sin desencriptar.
   ibanLast4     String

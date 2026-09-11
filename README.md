@@ -17,6 +17,33 @@ Este repositorio construye **la plataforma**. No construye —porque no se puede
 | SINPE Móvil | Se accede a través de un banco. El BCCR no conecta entidades no reguladas |
 | Retener fondos de terceros | Régimen SUGEF / Ley 8204. Mientras el adquirente liquide directo al comercio, no aplica |
 
+### Quién es quién
+
+| Rol | En Costa Rica | Qué hace |
+|---|---|---|
+| **Emisor** | El banco del comprador | Le dio la tarjeta, aprueba o rechaza el cobro |
+| **Adquirente** | BAC Credomatic, BN, BCR, Promerica, Davivienda | Tiene la licencia de Visa/Mastercard para afiliar comercios y recibe los fondos de la red |
+| **Pasarela** | Este repositorio | Conecta al comercio con el adquirente |
+
+### La comisión está regulada por ley
+
+La **Ley 9831** faculta al BCCR a fijar el tope máximo de la comisión de adquirencia, y lo revisa periódicamente. **No es un precio libre**: cobrar por encima expone a sanción.
+
+El código no lleva ningún tope hardcodeado a propósito — cualquier número escrito acá queda desactualizado en la próxima resolución y nadie se entera. Se configura con `CR_ACQUIRING_FEE_CAP_BPS` y el default (1,50 %) es deliberadamente conservador: si nadie lo configura, el sistema cobra de menos —un problema de negocio— en vez de cobrar de más, que es un problema legal.
+
+`checkAcquiringFee()` en `@colibripay/shared` valida una tarifa contra el tope, evaluando el componente fijo sobre el monto **mínimo** cobrable: ₡100 sobre una venta de ₡500 son 20 %, aunque sobre ₡50.000 sean 0,2 %.
+
+### Otras reglas locales
+
+`packages/shared/src/costa-rica.ts` concentra todo lo que depende del marco costarricense, para que una reforma se pueda rastrear en un solo archivo:
+
+- **Cédulas** — jurídica (10 dígitos desde 3), física (9), DIMEX, NITE
+- **IBAN** — 22 caracteres, validados con mod-97 (ISO 13616), que detecta el dígito mal tecleado
+- **SINPE Móvil** — móviles de 8 dígitos que empiezan en 6, 7 u 8; los fijos empiezan en 2 y no sirven
+- **IVA** — 13 % (Ley 9635)
+
+Hay valores marcados **VERIFICAR** que dependen de resoluciones vigentes y no deben darse por buenos sin contrastar contra la fuente oficial.
+
 La arquitectura está diseñada para que **nada de lo anterior bloquee el desarrollo hoy**: el core habla con un `AcquirerAdapter`, y el adaptador `sandbox` implementa la interfaz completa. Cuando exista contrato bancario se escribe un adaptador nuevo y el core no se toca.
 
 ---

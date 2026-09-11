@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { isValidSinpePhone } from '@colibripay/shared';
 
 /**
  * Entrada de `POST /v1/payment_methods`. Dos caminos, con consecuencias muy
@@ -49,8 +50,9 @@ const cardRawSchema = z.object({
 const sinpeSchema = z.object({
   type: z.literal('SINPE_MOVIL'),
   sinpe: z.object({
-    // Móvil costarricense: 8 dígitos empezando en 6, 7 u 8.
-    phoneNumber: z.string().regex(/^[678]\d{7}$/, 'Número SINPE Móvil inválido'),
+    // La regla vive en @colibripay/shared junto al resto de lo costarricense,
+    // no acá: si algún día cambia el plan de numeración, se toca un solo lugar.
+    phoneNumber: z.string().refine(isValidSinpePhone, 'Número SINPE Móvil inválido'),
     bankName: z.string().max(100).optional(),
   }),
   customerId: z.string().startsWith('cus_').optional(),
