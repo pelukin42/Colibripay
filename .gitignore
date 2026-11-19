@@ -36,3 +36,7 @@ coverage/
 
 # Base de datos local en proceso (PGlite)
 packages/db/.pgdata/
+.netlify/
+.venv/
+venv/
+__pycache__/
